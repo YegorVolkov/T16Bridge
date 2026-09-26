@@ -1,112 +1,128 @@
 # T16Bridge
 
-T16Bridge makes two identical **Thrustmaster T.16000M** joysticks appear as two independent virtual controllers and adds a graphical sensitivity-curve editor for every axis.
+<p align="center">
+  <img src="assets/t16000m-dual.webp" alt="Dual Thrustmaster T.16000M joysticks" width="700">
+</p>
 
-## End-user install
+**T16Bridge** makes two identical **Thrustmaster T.16000M** joysticks appear as two independent virtual controllers: `T16LEFT` and `T16RIGHT`.
 
-The intended release experience is:
+## 1. Problem
 
-1. Download `T16BridgeSetup-x64.exe` from GitHub Releases.
-2. Run it.
-3. Review the single consent screen listing every required component and its license.
-4. Tick **I agree** and click **Agree & Install**.
-5. Complete a possible Windows restart if HidHide requests one.
-6. Start T16Bridge and identify the physical LEFT and RIGHT sticks using **Test LEFT / Test RIGHT**.
+Some games identify both T.16000M sticks only by the same VID/PID/name and cannot reliably distinguish LEFT from RIGHT.
 
-The installer installs the complete required stack:
+That means two physical sticks can collapse into one logical device or share bindings incorrectly.
 
-- **T16Bridge**
-- **HIDMaestro v1.9.0** — MIT
-- **HidHide v1.5.230** — MIT
-- the self-contained .NET runtime needed by T16Bridge
+## 2. Solution
 
-Nothing is optional in the installer; the goal is one known-good configuration.
-
-## What T16Bridge does
+T16Bridge creates two separate virtual joysticks:
 
 ```text
-Physical LEFT T.16000M  -> T16Bridge -> curve -> T16LEFT
-Physical RIGHT T.16000M -> T16Bridge -> curve -> T16RIGHT
+Physical LEFT  T.16000M -> T16LEFT
+Physical RIGHT T.16000M -> T16RIGHT
 ```
 
-Physical input is read through HidSharp. Virtual controllers are created through HIDMaestro.
+The physical sticks are hidden from games with **HidHide**, while T16Bridge keeps access to them and forwards their input to the virtual devices.
 
-### Supported input
+## 3. How it works
 
-- X
-- Y
+On first launch:
+
+1. T16Bridge detects the connected T.16000M devices.
+2. You assign them as **LEFT** and **RIGHT** using the built-in input test.
+3. T16Bridge creates `T16LEFT` and `T16RIGHT` through HIDMaestro.
+4. HidHide automatically allow-lists T16Bridge, hides the two physical sticks, and enables device hiding.
+5. Games see the two independent virtual controllers instead of the original identical devices.
+
+Supported input:
+
+- X / Y
 - Rz / twist
 - Slider
 - 16 buttons
 - POV hat
 
-### Curves
+Device mapping is saved in `%LOCALAPPDATA%\T16Bridge`.
 
-Each device has independent curves for:
+## 4. Curves
 
-- X
-- Y
-- Rz
-- Slider
+T16Bridge includes a graphical sensitivity-curve editor for every axis on both virtual devices.
 
-For X/Y/Rz the graph is **center -> edge**:
+Features:
 
-```text
-0%   = physical center
-100% = either edge
-```
+- independent LEFT / RIGHT curves;
+- live input/output preview;
+- draggable control points;
+- add/remove/reset points;
+- copy a curve between axes or devices;
+- mirrored center-to-edge curves for X/Y/Rz;
+- no forced deadzone.
 
-The same curve is mirrored automatically to both directions. For example:
+Curve settings are saved automatically in `%LOCALAPPDATA%\T16Bridge`.
 
-```text
-50% input -> 30% output
-```
+## 5. Components & automation
 
-means both `+50% -> +30%` and `-50% -> -30%`.
+The installer deploys the complete required stack:
 
-The editor supports drag, double-click to add a point, Reset Linear, live input/output display, and copying a curve from any LEFT/RIGHT axis.
+| Component | Purpose |
+| --- | --- |
+| **T16Bridge** | Physical-to-virtual bridge and curve editor |
+| **HIDMaestro v1.9.0** | Creates `T16LEFT` / `T16RIGHT` virtual HID devices |
+| **HidHide v1.5.230** | Hides the two physical T.16000M devices from games |
+| **.NET runtime** | Bundled self-contained with T16Bridge |
 
-## First run
-
-T16Bridge detects connected T.16000M devices and opens the assignment dialog.
-
-For each side:
-
-1. Select a candidate device.
-2. Click **Test LEFT** or **Test RIGHT**.
-3. Move that physical stick within 5 seconds.
-4. `INPUT DETECTED` confirms the device.
-5. Save the assignment.
-
-Per-user settings are stored in:
+Installation is designed to be automatic:
 
 ```text
-%LOCALAPPDATA%\T16Bridge\curves.json
-%LOCALAPPDATA%\T16Bridge\device-mapping.json
+Download setup
+   -> Agree & Install
+   -> first-run LEFT/RIGHT identification
+   -> automatic HidHide configuration
+   -> done
 ```
 
-## Build locally
+The installer also creates **T16Bridge** shortcuts on the Desktop and in the Start Menu, plus an **Uninstall T16Bridge** Start Menu shortcut.
 
-Requirements for contributors:
+## 6. Uninstall
 
-- Windows 10/11 x64
-- .NET 10 SDK
-- PowerShell
-- Inno Setup 6 (only needed for the final installer)
+Use either:
 
-Prepare pinned third-party dependencies:
-
-```powershell
-.\scripts\prepare-deps.ps1
+```text
+Start Menu -> T16Bridge -> Uninstall T16Bridge
 ```
 
-Build the app:
+or:
 
-```powershell
-dotnet build .\src\T16Bridge\T16Bridge.csproj
+```text
+Settings -> Apps -> Installed apps -> T16Bridge -> Uninstall
 ```
 
-Build the complete release installer:
+The uninstaller removes the full T16Bridge stack created by the installer:
+
+- `T16LEFT` and `T16RIGHT`;
+- HIDMaestro virtual-controller/driver installation;
+- T16Bridge HidHide rules;
+- HidHide;
+- `%LOCALAPPDATA%\T16Bridge` settings;
+- program files and shortcuts.
+
+A Windows restart may be required after driver removal.
+
+## 7. Licenses
+
+T16Bridge is distributed under the **MIT License**.
+
+Third-party components:
+
+- **HIDMaestro** — MIT License
+- **HidHide** — MIT License
+
+The installer shows all required components before installation and links to the upstream projects/licenses. Exact third-party license texts are bundled with each release.
+
+See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for details.
+
+## Build
+
+Requirements for contributors: Windows x64, .NET 10 SDK, PowerShell, and Inno Setup 6.
 
 ```powershell
 .\scripts\build-release.ps1
@@ -117,43 +133,3 @@ Output:
 ```text
 artifacts\installer\T16BridgeSetup-x64.exe
 ```
-
-## GitHub release
-
-Push a version tag:
-
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-GitHub Actions will:
-
-1. download pinned HIDMaestro and HidHide releases;
-2. preserve their upstream license texts;
-3. publish T16Bridge as a self-contained `win-x64` application;
-4. build `T16BridgeSetup-x64.exe`;
-5. upload it to the GitHub Release.
-
-## Third-party software
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-HIDMaestro and HidHide are both MIT-licensed upstream projects. Their exact license files are bundled in every release installer. T16Bridge itself is MIT licensed.
-
-## Current scope
-
-The installer installs all required software. T16Bridge handles LEFT/RIGHT device identification and curves. Automatic HidHide device-rule configuration is the next integration step; until that is implemented, HidHide may still need its physical T.16000M hide rules configured once after installation.
-
-## Automatic HidHide configuration
-
-After LEFT/RIGHT device assignment, T16Bridge automatically configures HidHide:
-
-1. Adds the running `T16Bridge.exe` to the HidHide application allow-list.
-2. Adds both selected physical T.16000M device instance IDs to the HidHide hidden-device list.
-3. Forces normal allow-list mode (`inv-off`).
-4. Enables device hiding (`cloak-on`).
-
-This is also re-applied on later launches, so a completed installation normally requires no manual HidHide setup.
-
-If HidHide was just installed and its driver is not active yet, T16Bridge shows a warning asking for a Windows restart. The bridge itself remains usable, and the automatic configuration is retried on the next launch.

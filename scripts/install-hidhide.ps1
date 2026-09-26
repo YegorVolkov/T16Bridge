@@ -9,7 +9,8 @@ $exe = Join-Path $PayloadDirectory 'HidHideSetup.exe'
 $msi = Join-Path $PayloadDirectory 'HidHideSetup.msi'
 
 if (Test-Path $exe) {
-    $p = Start-Process -FilePath $exe -ArgumentList '/install /quiet /norestart' -Wait -PassThru
+    # HidHide v1.5.x bootstrapper accepts /quiet /norestart; /install is not a valid switch.
+    $p = Start-Process -FilePath $exe -ArgumentList '/quiet /norestart' -Wait -PassThru
     if ($p.ExitCode -notin @(0, 3010, 1641)) {
         throw "HidHide installer failed with exit code $($p.ExitCode)."
     }

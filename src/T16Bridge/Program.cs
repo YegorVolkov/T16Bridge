@@ -5,6 +5,11 @@ using System.Text.Json;
 using HidSharp;
 using HIDMaestro;
 
+if (args.Any(a => string.Equals(a, "--uninstall-cleanup", StringComparison.OrdinalIgnoreCase)))
+{
+    Environment.Exit(RunUninstallCleanup());
+}
+
 ApplicationConfiguration.Initialize();
 
 if (!IsAdministrator())
@@ -32,6 +37,180 @@ if (!IsAdministrator())
 }
 
 Application.Run(new MainForm());
+
+static int RunUninstallCleanup()
+{
+    try
+    {
+        // Remove HidHide rules created by T16Bridge before HidHide itself is uninstalled.
+        try
+        {
+            string? cli = FindHidHideCliForCleanup();
+
+            if (cli is not null)
+            {
+                string appPath = Environment.ProcessPath ?? string.Empty;
+
+                // Turn hiding off first so the physical sticks immediately become visible again.
+                RunCleanupCli(cli, "--cloak-off");
+
+                // Remove only T.16000M devices from HidHide's blacklist.
+                string hidden = RunCleanupCli(cli, "--dev-list");
+
+                foreach (string line in hidden.Split(
+                    new[] { '\r', '\n' },
+                    StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int firstQuote = line.IndexOf('"');
+                    int lastQuote = line.LastIndexOf('"');
+
+                    if (firstQuote >= 0 &&
+                        lastQuote > firstQuote &&
+                        line.Contains("VID_044F&PID_B10A", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string deviceInstancePath =
+                            line.Substring(firstQuote + 1, lastQuote - firstQuote - 1);
+
+                        RunCleanupCli(cli, "--dev-unhide", deviceInstancePath);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(appPath))
+                {
+                    try
+                    {
+                        RunCleanupCli(cli, "--app-unreg", appPath);
+                    }
+                    catch
+                    {
+                        // Non-fatal: HidHide itself is removed immediately afterwards.
+                    }
+                }
+
+                try
+                {
+                    RunCleanupCli(cli, "--app-clean");
+                }
+                catch
+                {
+                    // Non-fatal cleanup helper.
+                }
+            }
+        }
+        catch
+        {
+            // Continue with HIDMaestro cleanup even if HidHide cleanup fails.
+        }
+
+        // Remove all virtual controllers and the HIDMaestro-installed driver package.
+        try
+        {
+            HMOemNameOverride.RecoverOrphans();
+        }
+        catch
+        {
+        }
+
+        HMContext.RemoveAllVirtualControllers(preserveInstall: false);
+
+        // Remove per-user T16Bridge state.
+        string settingsDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "T16Bridge");
+
+        if (Directory.Exists(settingsDir))
+        {
+            Directory.Delete(settingsDir, recursive: true);
+        }
+
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(Path.GetTempPath(), "T16Bridge-uninstall-error.txt"),
+                ex.ToString());
+        }
+        catch
+        {
+        }
+
+        return 1;
+    }
+}
+
+static string? FindHidHideCliForCleanup()
+{
+    string[] candidates =
+    {
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "Nefarius Software Solutions",
+            "HidHide",
+            "x64",
+            "HidHideCLI.exe"),
+
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "Nefarius Software Solutions e.U.",
+            "HidHide",
+            "x64",
+            "HidHideCLI.exe"),
+
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "HidHide",
+            "x64",
+            "HidHideCLI.exe")
+    };
+
+    return candidates.FirstOrDefault(File.Exists);
+}
+
+static string RunCleanupCli(
+    string cli,
+    string command,
+    string? value = null)
+{
+    var psi = new ProcessStartInfo
+    {
+        FileName = cli,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
+
+    psi.ArgumentList.Add(command);
+
+    if (value is not null)
+    {
+        psi.ArgumentList.Add(value);
+    }
+
+    using Process process = Process.Start(psi)
+        ?? throw new InvalidOperationException("Failed to start HidHideCLI.exe.");
+
+    string stdout = process.StandardOutput.ReadToEnd();
+    string stderr = process.StandardError.ReadToEnd();
+
+    if (!process.WaitForExit(10000))
+    {
+        try { process.Kill(entireProcessTree: true); } catch { }
+        throw new TimeoutException($"HidHide cleanup command timed out: {command}");
+    }
+
+    if (process.ExitCode != 0)
+    {
+        throw new InvalidOperationException(
+            $"HidHide cleanup command {command} failed with exit code {process.ExitCode}. " +
+            stderr.Trim());
+    }
+
+    return stdout;
+}
 
 static bool IsAdministrator()
 {
@@ -522,67 +701,55 @@ public sealed class MainForm : Form
 
         try
         {
-            string leftInstance = HidPathToDeviceInstanceId(physicalLeft.DevicePath);
-            string rightInstance = HidPathToDeviceInstanceId(physicalRight.DevicePath);
+            // Ask HidHide itself for the authoritative Device Instance Paths.
+            // HidSharp exposes a symbolic HID path (\\?\hid#...), while HidHide
+            // blacklists SetupAPI Device Instance Paths (HID\VID_...\...).
+            // Converting the symbolic path by string replacement is not reliable
+            // enough across Windows/HID stack variants, so resolve by the unique
+            // instance token that both representations share.
+            var gamingDevices = GetHidHideGamingDevices(cli);
 
-            // One HidHideCLI transaction:
-            // 1. allow T16Bridge to see hidden devices,
-            // 2. hide both physical T.16000M devices,
-            // 3. force normal allow-list semantics,
-            // 4. enable cloaking.
-            string arguments =
-                $"--app-reg {QuoteArgument(appPath)} " +
-                $"--dev-hide {QuoteArgument(leftInstance)} " +
-                $"--dev-hide {QuoteArgument(rightInstance)} " +
-                "--inv-off --cloak-on";
+            string leftInstance =
+                ResolveHidHideDeviceInstancePath(physicalLeft.DevicePath, gamingDevices);
 
-            var psi = new ProcessStartInfo
-            {
-                FileName = cli,
-                Arguments = arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                WorkingDirectory = Path.GetDirectoryName(cli) ?? AppContext.BaseDirectory
-            };
+            string rightInstance =
+                ResolveHidHideDeviceInstancePath(physicalRight.DevicePath, gamingDevices);
 
-            using var process = Process.Start(psi);
-
-            if (process is null)
+            if (string.Equals(
+                leftInstance,
+                rightInstance,
+                StringComparison.OrdinalIgnoreCase))
             {
                 return HidHideConfigurationResult.Fail(
-                    "Failed to start HidHideCLI.exe.");
+                    "HidHide resolved LEFT and RIGHT to the same physical device.");
             }
 
-            string stdout = process.StandardOutput.ReadToEnd();
-            string stderr = process.StandardError.ReadToEnd();
+            // Execute one command per process. This mirrors HidHide's documented CLI
+            // usage and makes failures attributable to a single operation.
+            RunHidHideCli(cli, "--app-reg", appPath);
+            RunHidHideCli(cli, "--dev-hide", leftInstance);
+            RunHidHideCli(cli, "--dev-hide", rightInstance);
+            RunHidHideCli(cli, "--inv-off");
+            RunHidHideCli(cli, "--cloak-on");
 
-            if (!process.WaitForExit(10000))
+            // Verify the blacklist rather than assuming a zero exit code means that
+            // the intended physical devices were actually selected.
+            string hidden = RunHidHideCli(cli, "--dev-list");
+
+            bool leftHidden =
+                hidden.Contains(leftInstance, StringComparison.OrdinalIgnoreCase);
+
+            bool rightHidden =
+                hidden.Contains(rightInstance, StringComparison.OrdinalIgnoreCase);
+
+            if (!leftHidden || !rightHidden)
             {
-                try { process.Kill(entireProcessTree: true); } catch { }
-
                 return HidHideConfigurationResult.Fail(
-                    "HidHide configuration timed out.\n\n" +
-                    "Restart Windows and launch T16Bridge again.");
-            }
-
-            if (process.ExitCode != 0)
-            {
-                string detail = string.IsNullOrWhiteSpace(stderr)
-                    ? stdout
-                    : stderr;
-
-                if (detail.Length > 1200)
-                {
-                    detail = detail[..1200];
-                }
-
-                return HidHideConfigurationResult.Fail(
-                    $"HidHideCLI failed with exit code {process.ExitCode}.\n\n" +
-                    (string.IsNullOrWhiteSpace(detail)
-                        ? "Restart Windows and launch T16Bridge again."
-                        : detail.Trim()));
+                    "HidHide accepted the configuration commands, but the physical " +
+                    "T.16000M devices were not present in HidHide's hidden-device list.\n\n" +
+                    $"LEFT:  {leftInstance}\n" +
+                    $"RIGHT: {rightInstance}\n\n" +
+                    "Open HidHide Configuration Client and verify the Devices tab.");
             }
 
             return HidHideConfigurationResult.Ok();
@@ -594,6 +761,217 @@ public sealed class MainForm : Form
                 ex.Message +
                 "\n\nIf HidHide was just installed, restart Windows and launch T16Bridge again.");
         }
+    }
+
+    private static string RunHidHideCli(
+        string cli,
+        string command,
+        string? value = null)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = cli,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = Path.GetDirectoryName(cli) ?? AppContext.BaseDirectory
+        };
+
+        psi.ArgumentList.Add(command);
+
+        if (value is not null)
+        {
+            psi.ArgumentList.Add(value);
+        }
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start HidHideCLI.exe.");
+
+        string stdout = process.StandardOutput.ReadToEnd();
+        string stderr = process.StandardError.ReadToEnd();
+
+        if (!process.WaitForExit(10000))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+
+            throw new TimeoutException(
+                $"HidHide command timed out: {command}");
+        }
+
+        if (process.ExitCode != 0)
+        {
+            string detail = string.IsNullOrWhiteSpace(stderr)
+                ? stdout
+                : stderr;
+
+            if (detail.Length > 1200)
+            {
+                detail = detail[..1200];
+            }
+
+            throw new InvalidOperationException(
+                $"HidHideCLI {command} failed with exit code {process.ExitCode}." +
+                (string.IsNullOrWhiteSpace(detail)
+                    ? string.Empty
+                    : "\n\n" + detail.Trim()));
+        }
+
+        return stdout;
+    }
+
+    private sealed record HidHideGamingDevice(
+        string SymbolicLink,
+        string DeviceInstancePath,
+        string Vendor,
+        string Product);
+
+    private static List<HidHideGamingDevice> GetHidHideGamingDevices(string cli)
+    {
+        // HidHide returns an array of device groups:
+        // [
+        //   {
+        //     "friendlyName": "...",
+        //     "devices": [
+        //       {
+        //         "symbolicLink": "...",
+        //         "deviceInstancePath": "...",
+        //         ...
+        //       }
+        //     ]
+        //   }
+        // ]
+        //
+        // The previous implementation incorrectly expected symbolicLink and
+        // deviceInstancePath directly on the root array items, so it always
+        // produced an empty device list.
+        string json = RunHidHideCli(cli, "--dev-all");
+
+        using JsonDocument document = JsonDocument.Parse(json);
+
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException(
+                "Unexpected response from HidHideCLI --dev-all.");
+        }
+
+        var result = new List<HidHideGamingDevice>();
+
+        foreach (JsonElement group in document.RootElement.EnumerateArray())
+        {
+            if (!group.TryGetProperty("devices", out JsonElement devices) ||
+                devices.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (JsonElement device in devices.EnumerateArray())
+            {
+                string symbolicLink =
+                    GetJsonString(device, "symbolicLink");
+
+                string deviceInstancePath =
+                    GetJsonString(device, "deviceInstancePath");
+
+                if (string.IsNullOrWhiteSpace(symbolicLink) ||
+                    string.IsNullOrWhiteSpace(deviceInstancePath))
+                {
+                    continue;
+                }
+
+                result.Add(
+                    new HidHideGamingDevice(
+                        symbolicLink,
+                        deviceInstancePath,
+                        GetJsonString(device, "vendor"),
+                        GetJsonString(device, "product")));
+            }
+        }
+
+        return result;
+    }
+
+    private static string GetJsonString(
+        JsonElement element,
+        string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out JsonElement property) &&
+               property.ValueKind == JsonValueKind.String
+            ? property.GetString() ?? string.Empty
+            : string.Empty;
+    }
+
+    private static string ResolveHidHideDeviceInstancePath(
+        string hidSharpDevicePath,
+        IReadOnlyCollection<HidHideGamingDevice> hidHideDevices)
+    {
+        // HidSharp's DevicePath is the HID symbolic link.
+        // HidHide --dev-all exposes that exact value as "symbolicLink".
+        // Match on it directly, then use HidHide's authoritative
+        // "deviceInstancePath" for --dev-hide.
+        string normalizedPhysical =
+            NormalizeHidSymbolicLink(hidSharpDevicePath);
+
+        var exactMatches = hidHideDevices
+            .Where(device =>
+                string.Equals(
+                    NormalizeHidSymbolicLink(device.SymbolicLink),
+                    normalizedPhysical,
+                    StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (exactMatches.Count == 1)
+        {
+            return exactMatches[0].DeviceInstancePath;
+        }
+
+        if (exactMatches.Count > 1)
+        {
+            throw new InvalidOperationException(
+                "HidHide returned more than one entry for the same physical T.16000M symbolic link.");
+        }
+
+        // Diagnostic fallback only. We deliberately do NOT use the old HID
+        // instance token to configure HidHide because that token may belong
+        // to a child HID interface and need not be present in DeviceInstancePath.
+        string shortPath = hidSharpDevicePath.Length > 180
+            ? hidSharpDevicePath[..180] + "..."
+            : hidSharpDevicePath;
+
+        string available = string.Join(
+            Environment.NewLine,
+            hidHideDevices
+                .Where(device =>
+                    device.SymbolicLink.Contains(
+                        "vid_044f&pid_b10a",
+                        StringComparison.OrdinalIgnoreCase) ||
+                    device.DeviceInstancePath.Contains(
+                        "VID_044F&PID_B10A",
+                        StringComparison.OrdinalIgnoreCase))
+                .Select(device =>
+                    $"symbolicLink: {device.SymbolicLink}{Environment.NewLine}" +
+                    $"instancePath: {device.DeviceInstancePath}")
+                .Take(6));
+
+        throw new InvalidOperationException(
+            "Could not match the physical T.16000M in HidHide by symbolic link." +
+            Environment.NewLine + Environment.NewLine +
+            "HidSharp path:" + Environment.NewLine +
+            shortPath +
+            (string.IsNullOrWhiteSpace(available)
+                ? string.Empty
+                : Environment.NewLine + Environment.NewLine +
+                  "T.16000M entries reported by HidHide:" +
+                  Environment.NewLine + available));
+    }
+
+    private static string NormalizeHidSymbolicLink(string value)
+    {
+        // Windows/HID APIs can differ only in casing and slash spelling here.
+        // Keep the full path intact so two identical physical devices stay distinct.
+        return value
+            .Trim()
+            .Replace('/', '\\');
     }
 
     private static string? FindHidHideCli()
@@ -628,35 +1006,6 @@ public sealed class MainForm : Form
         ];
 
         return candidates.FirstOrDefault(File.Exists);
-    }
-
-    private static string HidPathToDeviceInstanceId(string hidPath)
-    {
-        // HidSharp path example:
-        // \\?\hid#vid_044f&pid_b10a#6&356926d2&0&0000#{GUID}
-        // HidHide expects:
-        // HID\VID_044F&PID_B10A\6&356926d2&0&0000
-        string normalized = hidPath.Trim();
-
-        if (normalized.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
-        {
-            normalized = normalized[4..];
-        }
-
-        string[] parts = normalized.Split('#');
-
-        if (parts.Length < 3)
-        {
-            throw new InvalidOperationException(
-                $"Unexpected HID device path: {hidPath}");
-        }
-
-        return $"{parts[0]}\\{parts[1]}\\{parts[2]}".ToUpperInvariant();
-    }
-
-    private static string QuoteArgument(string value)
-    {
-        return "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
     private DeviceMappingConfig? LoadDeviceMapping()

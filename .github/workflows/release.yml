@@ -24,7 +24,13 @@ jobs:
 
       - name: Install Inno Setup
         shell: powershell
-        run: choco install innosetup -y --no-progress
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            throw "Inno Setup installed, but ISCC.exe is not available on PATH."
+          }
+          Write-Host "ISCC: $($iscc.Source)"
 
       - name: Build installer
         shell: powershell

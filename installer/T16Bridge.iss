@@ -44,20 +44,34 @@ Source: "{#RepoRoot}\artifacts\licenses\HIDMaestro-LICENSE.txt"; DestDir: "{app}
 Source: "{#RepoRoot}\artifacts\licenses\HidHide-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#RepoRoot}\LICENSE"; DestDir: "{app}\licenses"; DestName: "T16Bridge-LICENSE.txt"; Flags: ignoreversion
 Source: "{#RepoRoot}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\scripts\uninstall-hidhide.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\T16Bridge"; Filename: "{app}\{#AppExe}"
+Name: "{autoprograms}\T16Bridge\T16Bridge"; Filename: "{app}\{#AppExe}"
+Name: "{autoprograms}\T16Bridge\Uninstall T16Bridge"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\T16Bridge"; Filename: "{app}\{#AppExe}"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch T16Bridge"; Flags: postinstall nowait skipifsilent shellexec
+
+[UninstallRun]
+; First remove T16Bridge's virtual devices, HIDMaestro driver package,
+; HidHide rules, and per-user state while T16Bridge.exe still exists.
+Filename: "{app}\{#AppExe}"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "T16BridgeCleanup"
+
+; Then remove HidHide itself.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\uninstall-hidhide.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "T16BridgeRemoveHidHide"
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{localappdata}\T16Bridge"
+Type: filesandordirs; Name: "{app}"
 
 [Code]
 var
   ConsentCheck: TNewCheckBox;
   HIDMaestroLink: TNewStaticText;
   HidHideLink: TNewStaticText;
-  InfoLabel: TNewStaticText;
+  InfoMemo: TNewMemo;
   RestartRequiredByHidHide: Boolean;
   ResultCode: Integer;
 
@@ -79,15 +93,19 @@ begin
   WizardForm.Caption := 'T16Bridge Setup';
   WizardForm.ReadyMemo.Visible := False;
 
-  InfoLabel := TNewStaticText.Create(WizardForm.ReadyPage);
-  InfoLabel.Parent := WizardForm.ReadyPage.Surface;
-  InfoLabel.Left := ScaleX(0);
-  InfoLabel.Top := ScaleY(0);
-  InfoLabel.Width := WizardForm.ReadyPage.SurfaceWidth;
-  InfoLabel.Height := ScaleY(220);
-  InfoLabel.AutoSize := False;
-  InfoLabel.WordWrap := True;
-  InfoLabel.Caption :=
+  InfoMemo := TNewMemo.Create(WizardForm.ReadyPage);
+  InfoMemo.Parent := WizardForm.ReadyMemo.Parent;
+  InfoMemo.Left := WizardForm.ReadyMemo.Left;
+  InfoMemo.Top := WizardForm.ReadyMemo.Top;
+  InfoMemo.Width := WizardForm.ReadyMemo.Width;
+  InfoMemo.Height := WizardForm.ReadyMemo.Height - ScaleY(70);
+  InfoMemo.ReadOnly := True;
+  InfoMemo.ScrollBars := ssVertical;
+  InfoMemo.WordWrap := True;
+  InfoMemo.WantReturns := False;
+  InfoMemo.TabStop := False;
+  InfoMemo.Color := WizardForm.Color;
+  InfoMemo.Text :=
     'The following REQUIRED components will be installed:' + #13#10 + #13#10 +
     '  ✓ T16Bridge' + #13#10 +
     '     Dual T.16000M bridge and graphical sensitivity curve editor.' + #13#10 + #13#10 +
@@ -102,9 +120,9 @@ begin
     'Administrator privileges are required. A Windows restart may be required by HidHide.';
 
   HIDMaestroLink := TNewStaticText.Create(WizardForm.ReadyPage);
-  HIDMaestroLink.Parent := WizardForm.ReadyPage.Surface;
-  HIDMaestroLink.Left := ScaleX(0);
-  HIDMaestroLink.Top := ScaleY(225);
+  HIDMaestroLink.Parent := WizardForm.ReadyMemo.Parent;
+  HIDMaestroLink.Left := WizardForm.ReadyMemo.Left;
+  HIDMaestroLink.Top := InfoMemo.Top + InfoMemo.Height + ScaleY(8);
   HIDMaestroLink.Caption := 'HIDMaestro project / license';
   HIDMaestroLink.Font.Color := clBlue;
   HIDMaestroLink.Font.Style := [fsUnderline];
@@ -112,9 +130,9 @@ begin
   HIDMaestroLink.OnClick := @OpenURL;
 
   HidHideLink := TNewStaticText.Create(WizardForm.ReadyPage);
-  HidHideLink.Parent := WizardForm.ReadyPage.Surface;
-  HidHideLink.Left := ScaleX(210);
-  HidHideLink.Top := ScaleY(225);
+  HidHideLink.Parent := WizardForm.ReadyMemo.Parent;
+  HidHideLink.Left := WizardForm.ReadyMemo.Left + ScaleX(210);
+  HidHideLink.Top := InfoMemo.Top + InfoMemo.Height + ScaleY(8);
   HidHideLink.Caption := 'HidHide project / license';
   HidHideLink.Font.Color := clBlue;
   HidHideLink.Font.Style := [fsUnderline];
@@ -122,10 +140,10 @@ begin
   HidHideLink.OnClick := @OpenURL;
 
   ConsentCheck := TNewCheckBox.Create(WizardForm.ReadyPage);
-  ConsentCheck.Parent := WizardForm.ReadyPage.Surface;
-  ConsentCheck.Left := ScaleX(0);
-  ConsentCheck.Top := ScaleY(260);
-  ConsentCheck.Width := WizardForm.ReadyPage.SurfaceWidth;
+  ConsentCheck.Parent := WizardForm.ReadyMemo.Parent;
+  ConsentCheck.Left := WizardForm.ReadyMemo.Left;
+  ConsentCheck.Top := InfoMemo.Top + InfoMemo.Height + ScaleY(36);
+  ConsentCheck.Width := WizardForm.ReadyMemo.Width;
   ConsentCheck.Caption := 'I agree to install all components listed above.';
   ConsentCheck.Checked := False;
   ConsentCheck.OnClick := @ConsentChanged;
@@ -184,4 +202,13 @@ end;
 function NeedRestart(): Boolean;
 begin
   Result := RestartRequiredByHidHide;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    { T16Bridge.exe --uninstall-cleanup and uninstall-hidhide.ps1
+      are executed by [UninstallRun] before files are deleted. }
+  end;
 end;
