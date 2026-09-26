@@ -1,0 +1,12 @@
+.vs/
+.idea/
+**/bin/
+**/obj/
+artifacts/
+src/T16Bridge/lib/HIDMaestro.Core.dll
+*.user
+*.suo
+
+# Per-user runtime settings (normally stored in %LOCALAPPDATA%\T16Bridge)
+curves.json
+device-mapping.json
