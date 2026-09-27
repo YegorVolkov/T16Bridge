@@ -25,6 +25,7 @@ DisableFinishedPage=no
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+SetupIconFile={#RepoRoot}\assets\T16Bridge.ico
 OutputDir={#OutputDir}
 OutputBaseFilename=T16BridgeSetup-x64
 Compression=lzma2/ultra64
@@ -49,7 +50,7 @@ Source: "{#RepoRoot}\scripts\uninstall-hidhide.ps1"; DestDir: "{app}\tools"; Fla
 [Icons]
 Name: "{autoprograms}\T16Bridge\T16Bridge"; Filename: "{app}\{#AppExe}"
 Name: "{autoprograms}\T16Bridge\Uninstall T16Bridge"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\T16Bridge"; Filename: "{app}\{#AppExe}"
+Name: "{autodesktop}\T16Bridge"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\T16Bridge.exe"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Launch T16Bridge"; Flags: postinstall nowait skipifsilent shellexec
