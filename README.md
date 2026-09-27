@@ -1,5 +1,7 @@
 # T16Bridge
 
+☕ [Say thanks on Ko-fi](https://ko-fi.com/yegorvolkov)
+
 <p align="center">
   <img src="assets/t16000m-dual.webp" alt="Dual Thrustmaster T.16000M joysticks" width="700">
 </p>
