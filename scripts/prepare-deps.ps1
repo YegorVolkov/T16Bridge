@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$hidMaestroVersion = 'v1.9.0'
+$hidMaestroVersion = 'v2.1.0'
 $hidHideVersion = 'v1.5.230.0'
 
 $depsDir = Join-Path $Root 'artifacts\deps'
@@ -32,8 +32,7 @@ $hmZip = Join-Path $tempDir 'HIDMaestro.zip'
 $hmUrl = "https://github.com/hifihedgehog/HIDMaestro/releases/download/$hidMaestroVersion/HIDMaestro-$hidMaestroVersion.zip"
 Invoke-WebRequest -Uri $hmUrl -OutFile $hmZip
 
-$hmExtract = Join-Path $tempDir 'hidmaestro'
-Remove-Item -Recurse -Force $hmExtract -ErrorAction SilentlyContinue
+$hmExtract = Join-Path $tempDir ('hidmaestro-' + [Guid]::NewGuid().ToString('N'))
 Expand-Archive -Path $hmZip -DestinationPath $hmExtract -Force
 
 $hmDll = Get-ChildItem -Path $hmExtract -Filter 'HIDMaestro.Core.dll' -Recurse | Select-Object -First 1

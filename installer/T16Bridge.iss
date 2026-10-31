@@ -6,7 +6,9 @@
 #endif
 
 #define AppName "T16Bridge"
-#define AppVersion "0.1.0"
+#ifndef AppVersion
+  #error AppVersion must be passed by scripts/build-release.ps1
+#endif
 #define AppPublisher "T16Bridge contributors"
 #define AppExe "T16Bridge.exe"
 
@@ -45,7 +47,6 @@ Source: "{#RepoRoot}\artifacts\licenses\HIDMaestro-LICENSE.txt"; DestDir: "{app}
 Source: "{#RepoRoot}\artifacts\licenses\HidHide-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "{#RepoRoot}\LICENSE"; DestDir: "{app}\licenses"; DestName: "T16Bridge-LICENSE.txt"; Flags: ignoreversion
 Source: "{#RepoRoot}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RepoRoot}\scripts\uninstall-hidhide.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\T16Bridge\T16Bridge"; Filename: "{app}\{#AppExe}"
@@ -56,12 +57,10 @@ Name: "{autodesktop}\T16Bridge"; Filename: "{app}\{#AppExe}"; IconFilename: "{ap
 Filename: "{app}\{#AppExe}"; Description: "Launch T16Bridge"; Flags: postinstall nowait skipifsilent shellexec
 
 [UninstallRun]
-; First remove T16Bridge's virtual devices, HIDMaestro driver package,
-; HidHide rules, and per-user state while T16Bridge.exe still exists.
+; Clean up exited HIDMaestro owners, T16Bridge HidHide rules, and per-user state.
+; Keep the shared HIDMaestro driver and HidHide installation available to other apps.
 Filename: "{app}\{#AppExe}"; Parameters: "--uninstall-cleanup"; Flags: runhidden waituntilterminated; RunOnceId: "T16BridgeCleanup"
 
-; Then remove HidHide itself.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\uninstall-hidhide.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "T16BridgeRemoveHidHide"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\T16Bridge"
@@ -110,7 +109,7 @@ begin
     'The following REQUIRED components will be installed:' + #13#10 + #13#10 +
     '  ✓ T16Bridge' + #13#10 +
     '     Dual T.16000M bridge and graphical sensitivity curve editor.' + #13#10 + #13#10 +
-    '  ✓ HIDMaestro v1.9.0' + #13#10 +
+    '  ✓ HIDMaestro v2.1.0' + #13#10 +
     '     Virtual HID runtime used by T16Bridge. MIT License.' + #13#10 + #13#10 +
     '  ✓ HidHide v1.5.230' + #13#10 +
     '     Required to hide the physical T.16000M devices from games. MIT License.' + #13#10 +
@@ -209,7 +208,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
-    { T16Bridge.exe --uninstall-cleanup and uninstall-hidhide.ps1
-      are executed by [UninstallRun] before files are deleted. }
+    { T16Bridge.exe --uninstall-cleanup is executed by [UninstallRun]
+      before files are deleted. Shared drivers remain installed. }
   end;
 end;

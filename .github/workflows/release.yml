@@ -33,10 +33,17 @@ jobs:
           Write-Host "ISCC: $($iscc.Source)"
 
       - name: Build installer
+        id: build
         shell: powershell
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .\scripts\build-release.ps1
+
+      - name: Check profiles and freeze behavior
+        shell: powershell
+        run: |
+          dotnet run --project tests/T16Bridge.Checks/T16Bridge.Checks.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'T16Bridge checks failed.' }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -49,4 +56,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/installer/T16BridgeSetup-x64.exe
-          generate_release_notes: true
+          name: T16Bridge v${{ steps.build.outputs.version }}
+          body_path: ${{ steps.build.outputs.release_notes }}

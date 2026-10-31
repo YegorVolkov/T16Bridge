@@ -4,6 +4,7 @@ using System.Security.Principal;
 using System.Text.Json;
 using HidSharp;
 using HIDMaestro;
+using T16Bridge;
 
 if (args.Any(a => string.Equals(a, "--uninstall-cleanup", StringComparison.OrdinalIgnoreCase)))
 {
@@ -42,7 +43,7 @@ static int RunUninstallCleanup()
 {
     try
     {
-        // Remove HidHide rules created by T16Bridge before HidHide itself is uninstalled.
+        // Remove T16Bridge's rules without changing the shared HidHide installation.
         try
         {
             string? cli = FindHidHideCliForCleanup();
@@ -50,9 +51,6 @@ static int RunUninstallCleanup()
             if (cli is not null)
             {
                 string appPath = Environment.ProcessPath ?? string.Empty;
-
-                // Turn hiding off first so the physical sticks immediately become visible again.
-                RunCleanupCli(cli, "--cloak-off");
 
                 // Remove only T.16000M devices from HidHide's blacklist.
                 string hidden = RunCleanupCli(cli, "--dev-list");
@@ -83,18 +81,10 @@ static int RunUninstallCleanup()
                     }
                     catch
                     {
-                        // Non-fatal: HidHide itself is removed immediately afterwards.
+                        // Non-fatal: continue cleaning up the remaining T16Bridge state.
                     }
                 }
 
-                try
-                {
-                    RunCleanupCli(cli, "--app-clean");
-                }
-                catch
-                {
-                    // Non-fatal cleanup helper.
-                }
             }
         }
         catch
@@ -102,7 +92,8 @@ static int RunUninstallCleanup()
             // Continue with HIDMaestro cleanup even if HidHide cleanup fails.
         }
 
-        // Remove all virtual controllers and the HIDMaestro-installed driver package.
+        // HIDMaestro 2.x sweeps exited owners only. Keep the shared driver installed;
+        // another application may need it even when that application is not running.
         try
         {
             HMOemNameOverride.RecoverOrphans();
@@ -111,7 +102,7 @@ static int RunUninstallCleanup()
         {
         }
 
-        HMContext.RemoveAllVirtualControllers(preserveInstall: false);
+        HMContext.RemoveAllVirtualControllers(preserveInstall: true);
 
         // Remove per-user T16Bridge state.
         string settingsDir = Path.Combine(
@@ -237,6 +228,24 @@ public sealed class MainForm : Form
 
     private readonly object _configLock = new();
     private AppCurveConfig _config = AppCurveConfig.CreateDefault();
+    private ProfileLibrary _profiles = new();
+    private string ProfilesPath => Path.Combine(_settingsDir, "profiles.json");
+    private readonly ComboBox _profileBox = new();
+
+    private readonly Label _freezeStatus = new() { AutoSize = true };
+    private readonly AxisFreezeState _leftFreeze = new();
+    private readonly AxisFreezeState _rightFreeze = new();
+    private bool _refreshing;
+    private readonly T16000ButtonMap _buttonMap = new(false);
+
+    private readonly Label _mapCaption = new() { AutoSize = true };
+    private readonly Button _learnButton = new() { Text = "Detect Freeze/Unfreeze X axis", AutoSize = true };
+    private readonly PhysicalButtonCapture _buttonCapture = new();
+    private int _captureSide = -1;
+    private int _capturedButton;
+    private bool _captureAll;
+    private readonly Button _learnAllButton = new() { Text = "Detect Freeze/Unfreeze all axes", AutoSize = true };
+    private volatile uint _leftButtons, _rightButtons;
 
     private HMContext? _hmContext;
     private HMController? _virtualLeft;
@@ -269,17 +278,19 @@ public sealed class MainForm : Form
         Interval = 33
     };
 
-    public MainForm()
+    public MainForm(string? settingsDirectory = null)
     {
+        if (settingsDirectory is not null) _settingsDir = settingsDirectory;
         Text = "T16Bridge Curves";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(860, 620);
-        Size = new Size(980, 720);
+        MinimumSize = new Size(960, 720);
+        Size = new Size(1100, 820);
 
         Directory.CreateDirectory(_settingsDir);
 
         BuildUi();
         LoadCurveConfig();
+        RefreshProfiles();
         RefreshEditor();
 
         Shown += async (_, _) =>
@@ -300,7 +311,11 @@ public sealed class MainForm : Form
             }
         };
 
-        FormClosing += (_, _) => StopBridge();
+        FormClosing += (_, e) =>
+        {
+            if (!SaveCurveConfig()) { e.Cancel = true; return; }
+            StopBridge();
+        };
     }
 
     private void BuildUi()
@@ -309,10 +324,11 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             Padding = new Padding(12)
         };
 
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -394,6 +410,7 @@ public sealed class MainForm : Form
             }
 
             RefreshEditor();
+            SaveCurveConfig();
         };
         top.Controls.Add(_linearButton);
 
@@ -408,6 +425,7 @@ public sealed class MainForm : Form
                 curve.AddPoint(0.5f, 0.5f);
             }
             RefreshEditor();
+            SaveCurveConfig();
         };
         top.Controls.Add(_addPointButton);
 
@@ -416,8 +434,7 @@ public sealed class MainForm : Form
         _saveButton.Margin = new Padding(8, 3, 0, 0);
         _saveButton.Click += (_, _) =>
         {
-            SaveCurveConfig();
-            _status.Text = $"Saved: {ConfigPath}";
+            if (SaveCurveConfig()) _status.Text = $"Saved profile: {_profiles.Active.Name}";
         };
         top.Controls.Add(_saveButton);
 
@@ -465,6 +482,7 @@ public sealed class MainForm : Form
         {
             // Curve object is edited in-place, so bridge sees changes immediately.
             _curvePanel.Invalidate();
+            SaveCurveConfig();
         };
 
         var live = new FlowLayoutPanel
@@ -486,20 +504,83 @@ public sealed class MainForm : Form
         _status.Text = "Starting...";
         _status.Padding = new Padding(0, 4, 0, 0);
 
-        root.Controls.Add(top, 0, 0);
-        root.Controls.Add(_curvePanel, 0, 1);
-        root.Controls.Add(live, 0, 2);
-        root.Controls.Add(_status, 0, 3);
+        var profileBar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+        profileBar.Controls.Add(new Label { Text = "Profile:", AutoSize = true, Margin = new Padding(0, 8, 6, 0) });
+        _profileBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _profileBox.Width = 220;
+        _profileBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (_refreshing || _profileBox.SelectedItem is not SensitivityProfile profile) return;
+            lock (_configLock)
+            {
+                _profiles.ActiveProfileId = profile.Id;
+                _config = profile.Curves;
+                _leftFreeze.Clear();
+                _rightFreeze.Clear();
+            }
+            SaveCurveConfig();
+            RefreshEditor();
+        };
+        profileBar.Controls.Add(_profileBox);
+        foreach (var action in new[] { "New", "Duplicate", "Rename" })
+        {
+            var button = new Button { Text = action, AutoSize = true };
+            button.Click += (_, _) => EditProfile(action);
+            profileBar.Controls.Add(button);
+        }
+        live.Controls.Add(_freezeStatus);
+        root.Controls.Add(profileBar, 0, 0);
+        root.Controls.Add(top, 0, 1);
+        var editorBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+        editorBody.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        editorBody.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 320));
+        editorBody.Controls.Add(_curvePanel, 0, 0);
+        var mapLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Padding = new Padding(8, 0, 0, 0) };
+        mapLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (int row = 0; row < 5; row++)
+            mapLayout.RowStyles.Add(new RowStyle(row == 1 ? SizeType.Percent : SizeType.AutoSize, row == 1 ? 100 : 0));
+        _mapCaption.Margin = new Padding(0, 4, 0, 6);
+        mapLayout.Controls.Add(_mapCaption, 0, 0);
+        _buttonMap.Dock = DockStyle.Fill;
+        mapLayout.Controls.Add(_buttonMap, 0, 1);
+        mapLayout.Controls.Add(new Label { Text = "Blue: assigned   Orange: pressed", AutoSize = true, Margin = new Padding(0, 6, 0, 6) }, 0, 2);
+        _learnButton.Dock = DockStyle.Top;
+        _learnAllButton.Dock = DockStyle.Top;
+        _learnButton.Click += (_, _) => StartButtonCapture(false);
+        _learnAllButton.Click += (_, _) => StartButtonCapture(true);
+        mapLayout.Controls.Add(_learnButton, 0, 3);
+        mapLayout.Controls.Add(_learnAllButton, 0, 4);
+        editorBody.Controls.Add(mapLayout, 1, 0);
+        root.Controls.Add(editorBody, 0, 2);
+        root.Controls.Add(live, 0, 3);
+        root.Controls.Add(_status, 0, 4);
 
         Controls.Add(root);
 
         _uiTimer.Tick += (_, _) =>
         {
+            int captured;
+            lock (_configLock) captured = _capturedButton;
+            if (captured > 0)
+            {
+                lock (_configLock)
+                {
+                    var deviceConfig = _deviceBox.SelectedIndex == 0 ? _config.Left : _config.Right;
+                    deviceConfig.AssignFreezeButton(_axisBox.SelectedItem?.ToString() ?? "X", captured, _captureAll);
+                    (_deviceBox.SelectedIndex == 0 ? _leftFreeze : _rightFreeze).Clear();
+                }
+                CancelButtonCapture();
+                SaveCurveConfig();
+            }
+            UpdateButtonMap();
             var device = _deviceBox.SelectedItem?.ToString() ?? "LEFT";
             var axis = _axisBox.SelectedItem?.ToString() ?? "X";
 
             float input = GetLiveValue(device, axis, output: false);
             float output = GetLiveValue(device, axis, output: true);
+            lock (_configLock)
+                _freezeStatus.Text = (_deviceBox.SelectedIndex == 0 ? _leftFreeze : _rightFreeze).IsFrozen(axis)
+                    ? "  FROZEN — press assigned button to release" : "  Axis free";
 
             _curvePanel.LiveInput = ToGraphValue(input, axis);
             _curvePanel.LiveOutput = ToGraphValue(output, axis);
@@ -1037,6 +1118,9 @@ public sealed class MainForm : Form
     private void StopBridge()
     {
         _uiTimer.Stop();
+        CancelButtonCapture();
+        _leftButtons = _rightButtons = 0;
+        lock (_configLock) { _leftFreeze.Clear(); _rightFreeze.Clear(); }
 
         try
         {
@@ -1077,7 +1161,9 @@ public sealed class MainForm : Form
 
         using (stream)
         {
-            stream.ReadTimeout = 250;
+            stream.ReadTimeout = 50;
+            PhysicalState? lastInput = null;
+            lock (_configLock) (side == Side.Left ? _leftFreeze : _rightFreeze).Reset();
 
             var buffer =
                 new byte[physical.GetMaxInputReportLength()];
@@ -1086,15 +1172,14 @@ public sealed class MainForm : Form
             {
                 try
                 {
-                    int count =
-                        stream.Read(buffer, 0, buffer.Length);
-
-                    if (count < 10)
-                    {
-                        continue;
-                    }
-
-                    var decoded = DecodePhysical(buffer);
+                    int count;
+                    try { count = stream.Read(buffer, 0, buffer.Length); }
+                    catch (TimeoutException) { count = 0; }
+                    if (count >= 10) lastInput = DecodePhysical(buffer);
+                    else if (count > 0) continue;
+                    // Reapply profile edits and UI unlocks even when the stick is stationary.
+                    if (lastInput is null) continue;
+                    var decoded = lastInput.Value;
                     var output = ApplyCurves(side, decoded);
 
                     if (side == Side.Left)
@@ -1167,13 +1252,31 @@ public sealed class MainForm : Form
                     ? _config.Left
                     : _config.Right;
 
-            return input with
+            var freeze = side == Side.Left ? _leftFreeze : _rightFreeze;
+            uint buttons = (uint)input.Buttons;
+            if (side == Side.Left) _leftButtons = buttons;
+            else _rightButtons = buttons;
+            if (_captureSide == (side == Side.Left ? 0 : 1))
             {
-                X = device.X.Apply01(input.X),
-                Y = device.Y.Apply01(input.Y),
-                Rz = device.Rz.Apply01(input.Rz),
-                Slider = device.Slider.Apply01(input.Slider)
+                // Physical detection must not toggle an existing freeze binding.
+                freeze.EndReport(buttons);
+                int captured = _buttonCapture.Observe(buttons);
+                if (captured > 0) _capturedButton = captured;
+            }
+            var values = new Dictionary<string, float>
+            {
+                ["X"] = device.X.Apply01(input.X), ["Y"] = device.Y.Apply01(input.Y),
+                ["Rz"] = device.Rz.Apply01(input.Rz), ["Slider"] = device.Slider.Apply01(input.Slider)
             };
+            if (freeze.ToggleAll(device.FreezeAllButton, buttons, values)) freeze.EndReport(buttons);
+            float Apply(string axis) => freeze.Apply(axis, values[axis],
+                device.FreezeButtons.GetValueOrDefault(axis), buttons, keepUnbound: device.FreezeAllButton > 0);
+            var result = input with
+            {
+                X = Apply("X"), Y = Apply("Y"), Rz = Apply("Rz"), Slider = Apply("Slider")
+            };
+            freeze.EndReport(buttons);
+            return result;
         }
     }
 
@@ -1226,44 +1329,33 @@ public sealed class MainForm : Form
     {
         lock (_configLock)
         {
-            if (!File.Exists(ConfigPath))
-            {
-                _config = AppCurveConfig.CreateDefault();
-                SaveCurveConfig();
-                return;
-            }
-
             try
             {
-                var json = File.ReadAllText(ConfigPath);
-
-                _config =
-                    JsonSerializer.Deserialize<AppCurveConfig>(
-                        json,
-                        JsonOptions())
-                    ?? AppCurveConfig.CreateDefault();
-
-                _config.Normalize();
+                _profiles = ProfileLibrary.Load(ProfilesPath, ConfigPath);
+                _config = _profiles.Active.Curves;
             }
-            catch
+            catch (Exception ex)
             {
-                _config = AppCurveConfig.CreateDefault();
+                // Never overwrite a damaged library silently with default settings.
+                MessageBox.Show("Could not load sensitivity profiles: " + ex.Message,
+                    "T16Bridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                throw;
             }
         }
     }
 
-    private void SaveCurveConfig()
+    private bool SaveCurveConfig()
     {
-        lock (_configLock)
+        try
         {
-            _config.Normalize();
-
-            var json =
-                JsonSerializer.Serialize(
-                    _config,
-                    JsonOptions());
-
-            File.WriteAllText(ConfigPath, json);
+            lock (_configLock) _profiles.Save(ProfilesPath);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, "Could not save profiles. Your edits remain open.\n" + ex.Message,
+                "T16Bridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
         }
     }
 
@@ -1284,12 +1376,106 @@ public sealed class MainForm : Form
             return;
         }
 
+        CancelButtonCapture();
+
         lock (_configLock)
         {
             _curvePanel.Curve = GetSelectedCurve();
         }
 
         _curvePanel.Invalidate();
+        UpdateButtonMap();
+    }
+
+    private void CancelButtonCapture()
+    {
+        lock (_configLock)
+        {
+            _buttonCapture.Cancel();
+            _captureSide = -1;
+            _capturedButton = 0;
+        }
+        UpdateCaptureLabels();
+    }
+
+    private void StartButtonCapture(bool allAxes)
+    {
+        if (_captureSide >= 0 && _captureAll == allAxes) { CancelButtonCapture(); return; }
+        CancelButtonCapture();
+        lock (_configLock)
+        {
+            _captureSide = _deviceBox.SelectedIndex;
+            _captureAll = allAxes;
+            _buttonCapture.Arm(_captureSide == 0 ? _leftButtons : _rightButtons);
+        }
+        UpdateCaptureLabels();
+    }
+
+    private void UpdateCaptureLabels()
+    {
+        string axis = _axisBox.SelectedItem?.ToString() ?? "X";
+        _learnButton.Text = _captureSide >= 0 && !_captureAll ? "Press freeze button… (cancel)" : $"Detect Freeze/Unfreeze {axis} axis";
+        _learnAllButton.Text = _captureSide >= 0 && _captureAll ? "Press all-axes button… (cancel)" : "Detect Freeze/Unfreeze all axes";
+    }
+
+    private void UpdateButtonMap()
+    {
+        bool left = _deviceBox.SelectedIndex == 0;
+        string axis = _axisBox.SelectedItem?.ToString() ?? "X";
+        var device = left ? _config.Left : _config.Right;
+        int button = device.FreezeButtons.GetValueOrDefault(axis);
+        _mapCaption.Text = $"{(left ? "LEFT" : "RIGHT")} / {axis}";
+        _buttonMap.ShowState(left, button, left ? _leftButtons : _rightButtons, device.FreezeAllButton);
+        UpdateCaptureLabels();
+    }
+    private void RefreshProfiles()
+    {
+        _refreshing = true;
+        try
+        {
+            _profileBox.Items.Clear();
+            foreach (var profile in _profiles.Profiles) _profileBox.Items.Add(profile);
+            _profileBox.SelectedItem = _profiles.Active;
+        }
+        finally { _refreshing = false; }
+    }
+
+    private void EditProfile(string action)
+    {
+        using var dialog = new Form
+        {
+            Text = action + " profile", StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog, ClientSize = new Size(360, 110),
+            MinimizeBox = false, MaximizeBox = false
+        };
+        var name = new TextBox { Left = 12, Top = 12, Width = 336,
+            Text = action == "Rename" ? _profiles.Active.Name : action == "Duplicate" ? _profiles.Active.Name + " copy" : "New profile" };
+        var ok = new Button { Text = "OK", Left = 180, Top = 56, DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", Left = 270, Top = 56, DialogResult = DialogResult.Cancel };
+        dialog.Controls.AddRange([name, ok, cancel]);
+        dialog.AcceptButton = ok;
+        dialog.CancelButton = cancel;
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            lock (_configLock)
+            {
+                if (action == "Rename") _profiles.RenameActive(name.Text);
+                else
+                {
+                    _config = _profiles.Add(name.Text, action == "Duplicate").Curves;
+                    _leftFreeze.Clear();
+                    _rightFreeze.Clear();
+                }
+            }
+            RefreshProfiles();
+            RefreshEditor();
+            SaveCurveConfig();
+        }
+        catch (ArgumentException ex)
+        {
+            MessageBox.Show(this, ex.Message, "Profile name", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
     }
 
     private void CopySelectedCurve()
@@ -1325,6 +1511,7 @@ public sealed class MainForm : Form
         _status.Text =
             $"Copied {sourceName} -> " +
             $"{_deviceBox.SelectedItem}/{_axisBox.SelectedItem}";
+        SaveCurveConfig();
     }
 
     private CurveDefinition GetCurve(
@@ -2281,6 +2468,23 @@ public sealed class AppCurveConfig
 
 public sealed class DeviceCurveConfig
 {
+    public int FreezeAllButton { get; set; }
+    public void AssignFreezeButton(string axis, int button, bool allAxes)
+    {
+        if (button is < 1 or > 16) throw new ArgumentOutOfRangeException(nameof(button));
+        if (allAxes)
+        {
+            FreezeAllButton = button;
+            foreach (string key in FreezeButtons.Keys.ToArray())
+                if (FreezeButtons[key] == button) FreezeButtons[key] = 0;
+        }
+        else
+        {
+            FreezeButtons[axis] = button;
+            if (FreezeAllButton == button) FreezeAllButton = 0;
+        }
+    }
+    public Dictionary<string, int> FreezeButtons { get; set; } = new();
     public CurveDefinition X { get; set; } =
         CurveDefinition.CreateLinear(true);
 
@@ -2306,6 +2510,10 @@ public sealed class DeviceCurveConfig
 
     public void Normalize()
     {
+        FreezeButtons ??= new();
+        if (FreezeAllButton is < 0 or > 16) FreezeAllButton = 0;
+        foreach (string axis in FreezeButtons.Keys.ToArray())
+            if (FreezeButtons[axis] is < 0 or > 16) FreezeButtons[axis] = 0;
         X ??= CurveDefinition.CreateLinear(true);
         Y ??= CurveDefinition.CreateLinear(true);
         Rz ??= CurveDefinition.CreateLinear(true);

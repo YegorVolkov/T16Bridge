@@ -5,7 +5,7 @@ T16Bridge uses and redistributes the following required third-party components.
 ## HIDMaestro
 
 - Project: https://github.com/hifihedgehog/HIDMaestro
-- Pinned release: `v1.9.0`
+- Pinned release: `v2.1.0`
 - License: MIT
 - Purpose: creates the virtual `T16LEFT` / `T16RIGHT` HID devices.
 

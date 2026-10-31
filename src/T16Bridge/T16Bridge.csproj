@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>T16Bridge</AssemblyName>
     <RootNamespace>T16Bridge</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
       <ApplicationIcon>..\..\assets\T16Bridge.ico</ApplicationIcon>
   </PropertyGroup>
